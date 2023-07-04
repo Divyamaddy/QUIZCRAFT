@@ -1,0 +1,114 @@
+import { google } from 'googleapis';
+import User from '../models/User.js';
+import jwt from "jsonwebtoken";
+
+const checkAuth = async(req, res, next) => {
+    try {
+        const token = req.headers.authorization.split(" ")[1];
+        const decoded = await jwt.verify(token, process.env.JWT_SECRET);
+        if (!decoded) {
+            return res.status(401).send("Unauthorized");
+        }
+        const email = decoded.email;
+        const user = await User.findOne({email});
+        if (!user) {
+            return res.status(401).send("Unauthorized");
+        }
+        req.user = user;
+        next();
+    } catch (error) {
+        return res.status(401).send("Unauthorized");
+    }
+}
+
+const getProfileController = (req, res) => {
+    const profileData = {
+        name : req.user.name,
+        email : req.user.email,
+        picture : req.user.picture,
+    }
+    res.status(200).send(profileData);
+}
+    
+const getProfileInfo = async (access_token) => {
+    return new Promise(async (resolve, reject) => {
+        try {
+            const url = `https://www.googleapis.com/oauth2/v1/userinfo?alt=json&access_token=${access_token}`
+            const response = await fetch(url);
+            const data = await response.json();
+            resolve(data)
+        } catch (err) {
+            reject(err)
+        }
+    })
+}
+const requestValidations = (req, res, next) => {
+    // Check if the request is made via XMLHttpRequest
+    if (req.headers["x-requested-with"] !== "XMLHttpRequest") {
+        return res.status(400).send("Invalid Request 1");
+    }
+
+    // Check if the request body has a 'code' property
+    if (!req.body.code) {
+        return res.status(400).send("Invalid Request 2");
+    }
+
+    // If both validations pass, call the next middleware in the stack
+    next();
+}
+
+
+const googleAuthController = async (req, res) => {
+    try {
+        const { code } = req.body;
+        // Super important to use "postmessage" as the redirect_uri
+        // for a popup window. Otherwise, the OAuth2.0 flow will fail.
+        const oauth2Client = new google.auth.OAuth2(
+            process.env.GOOGLE_CLIENT_ID,
+            process.env.GOOGLE_CLIENT_SECRET,
+            "postmessage"
+        );
+
+        let { tokens } = await oauth2Client.getToken(code);
+        const profileInfo = await getProfileInfo(tokens.access_token);
+        // check if the email is already in the database
+        const email_in_db = await User.findOne({ email: profileInfo.email });
+        if (email_in_db) {
+            // update the tokens
+            await User.findOneAndUpdate({ email: profileInfo.email }, {
+                tokens : tokens,
+            });
+
+            const token = jwt.sign({ email: profileInfo.email }, process.env.JWT_SECRET, {
+                expiresIn: "30d"
+            });
+            return res.status(200).json({
+                result: "success",
+                token
+            })
+        }
+
+        const newUser = new User({
+            name: profileInfo.name,
+            email: profileInfo.email,
+            picture: profileInfo.picture,
+            tokens : tokens,
+        });
+        await newUser.save();
+
+        const token = jwt.sign({ email: profileInfo.email }, process.env.JWT_SECRET, {
+            expiresIn: "30d"
+        });
+        res.status(200).json({
+            result: "success",
+            token
+        })
+    } catch (err) {
+        res.status(500).json({
+            result: "error",
+            message: err.message
+        })
+    }
+}
+
+export { requestValidations, googleAuthController, checkAuth, getProfileController }
